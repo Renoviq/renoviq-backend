@@ -9,7 +9,7 @@ The web app lives in its own repository, [renoviq-frontend](https://github.com/R
 ```
                          EC2 server
 browser ──https──▶ nginx ─┬─ /            static files (renoviq-frontend build)
-                          └─ /api, /auth ─▶ backend container :3000 ─▶ MongoDB container
+                          └─ /api, /auth/google ─▶ backend container :3000 ─▶ MongoDB container
                                                      ├─▶ Gemini (redesigns the photo)
                                                      └─▶ S3 bucket (private, via the EC2 instance role)
 ```
@@ -46,7 +46,7 @@ cp .env.example .env      # fill it in
 npm run dev               # http://localhost:3000, restarts on change
 ```
 
-Run the web app next to it (`renoviq-frontend`, `npm run dev`); its dev server forwards `/api` and `/auth` to port 3000.
+Run the web app next to it (`renoviq-frontend`, `npm run dev`); its dev server forwards `/api` and `/auth/google` to port 3000.
 
 | Command | What it does |
 | --- | --- |

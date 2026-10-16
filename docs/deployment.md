@@ -5,7 +5,7 @@ This guide takes you from nothing to a running site on one EC2 server. You set u
 ```
 browser ──https──▶ nginx (on the EC2 server)
                     ├─ /            the web app files   (renoviq-frontend workflow copies them)
-                    └─ /api, /auth ─▶ backend container ─▶ MongoDB container   (renoviq-backend workflow)
+                    └─ /api, /auth/google ─▶ backend container ─▶ MongoDB container   (renoviq-backend workflow)
                                           ├─▶ Gemini      (redesigns the photo)
                                           └─▶ S3 bucket   (keeps the photos, private)
 ```
@@ -144,7 +144,7 @@ sudo nginx -t && sudo systemctl reload nginx
 sudo certbot --nginx -d YOUR.DOMAIN
 ```
 
-The file is `deploy/nginx/renoviq.conf` in this repository. It serves the web app from `/var/www/renoviq/current`, forwards `/api` and `/auth` to the API on `127.0.0.1:3000`, allows photo uploads up to 6 MB, waits up to 120 s for the AI, and rate-limits the sign-in endpoints. Certbot asks for an email, adds the HTTPS block and redirects HTTP to HTTPS, and renews the certificate by itself.
+The file is `deploy/nginx/renoviq.conf` in this repository. It serves the web app from `/var/www/renoviq/current`, forwards `/api` and `/auth/google` (Google sign-in) to the API on `127.0.0.1:3000`, allows photo uploads up to 6 MB, waits up to 120 s for the AI, and rate-limits the sign-in endpoints. Certbot asks for an email, adds the HTTPS block and redirects HTTP to HTTPS, and renews the certificate by itself.
 
 Until the first frontend deploy, the site shows an error because `/var/www/renoviq/current` does not exist yet. That is expected.
 

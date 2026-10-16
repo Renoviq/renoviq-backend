@@ -1,0 +1,10 @@
+node_modules
+dist/
+.DS_Store
+*.tar.gz
+
+# secrets
+.env
+.env.*
+!.env.example
+*service-account*.json

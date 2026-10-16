@@ -146,7 +146,7 @@ jobs:
                 await new S3Client({}).send(new HeadBucketCommand({ Bucket: process.env.S3_BUCKET }));
                 console.log('S3 bucket ' + process.env.S3_BUCKET + ' is reachable');
               }).catch((e) => {
-                console.error('S3 check failed: ' + e.name + ' (HTTP ' + ((e.$metadata && e.$metadata.httpStatusCode) || 'none') + '): ' + e.message);
+                console.error('S3 check failed: ' + e.name + ' (HTTP ' + ((e.\$metadata && e.\$metadata.httpStatusCode) || 'none') + '): ' + e.message);
                 console.error('Check S3_BUCKET and AWS_REGION in /opt/renoviq/.env, the IAM role on the instance and its metadata hop limit (docs/deployment.md).');
                 process.exit(1);
               });"

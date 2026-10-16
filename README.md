@@ -56,7 +56,7 @@ Run the web app next to it (`renoviq-frontend`, `npm run dev`); its dev server p
 
 ### Environment variables
 
-See `.env.example` (local) and `deploy/server.env.example` (server). `SESSION_SECRET` and the Google OAuth settings are required, the app does not start without them. The SMTP settings are needed for sign-up codes and contact emails.
+See `.env.example` for local development; on the server the same settings come from the GitHub secrets (table below). `SESSION_SECRET` and the Google OAuth settings are required, the app does not start without them. The SMTP settings are needed for sign-up codes and contact emails.
 
 | Variable | Purpose |
 | --- | --- |
@@ -95,43 +95,47 @@ docker build -t renoviq-backend .
 
 Multi-stage build on `node:20-alpine`, runs as the unprivileged `node` user and has a health check on `/api/health`.
 
-## Deploy to EC2 (nginx + Docker)
+## Deploy to EC2 (GitHub Actions + Docker + nginx)
 
-The server runs nginx directly on the host. The backend and MongoDB run as containers started with `deploy/docker-compose.yml`. The API is published on `127.0.0.1:3000` only, MongoDB has no published port.
+Everything is done by one manual workflow: Actions tab → **Deploy backend** → Run workflow. It never runs on a push. The backend and MongoDB run as containers (`deploy/docker-compose.yml`); the API is published on `127.0.0.1:3000` only and MongoDB has no published port.
 
-### One-time server setup (Ubuntu)
+### What you prepare on the server (Ubuntu, once)
 
-1. **DNS:** point your domain at the server's public IP. Open ports 80 and 443 in the security group.
-2. **Install:** Docker Engine with the Compose plugin, nginx and certbot.
-   ```bash
-   sudo apt-get install -y nginx certbot python3-certbot-nginx   # Docker: https://docs.docker.com/engine/install/ubuntu/
-   sudo usermod -aG docker "$USER"                               # log out and in again
-   ```
-3. **Folders** (the deploy user must own them, the workflows write there as that user):
-   ```bash
-   sudo install -d -o "$USER" -g "$USER" /opt/renoviq /var/www/renoviq
-   cp deploy/server.env.example /opt/renoviq/.env && chmod 600 /opt/renoviq/.env   # then fill it in
-   ```
-4. **nginx:** follow the steps at the top of `deploy/nginx/renoviq.conf` (copy, set your domain, enable, `nginx -t`, reload, then `sudo certbot --nginx -d <domain>`). The config serves `/var/www/renoviq/current`, proxies `/api` and `/auth`, waits up to 120 s for the AI and rate-limits the sign-in endpoints.
+1. **Docker Engine with the Compose plugin** ([install guide](https://docs.docker.com/engine/install/ubuntu/)), and let the SSH user run it: `sudo usermod -aG docker <user>` (log in again afterwards).
+2. **Passwordless sudo for that user** (the default on EC2 Ubuntu images). The first run uses it only to create `/opt/renoviq`.
+3. **nginx, DNS and HTTPS, configured by you.** The workflow never touches nginx. `deploy/nginx/renoviq.conf` is a ready config you can start from: it serves `/var/www/renoviq/current` (the frontend), proxies `/api` and `/auth` to `127.0.0.1:3000`, waits up to 120 s for the AI and rate-limits sign-in. Install steps are at the top of the file; `sudo certbot --nginx -d <domain>` adds HTTPS.
+4. **An SSH key pair** for the workflow: the public key goes into the server's `~/.ssh/authorized_keys`.
 5. **Google sign-in:** add `https://<domain>/auth/google/callback` to the OAuth client's redirect URIs.
-6. **GitHub (Settings → Secrets and variables → Actions):**
 
-   | Name | Type | Value |
-   | --- | --- | --- |
-   | `DOCKERHUB_USERNAME` | variable | Docker Hub user or organisation |
-   | `DOCKERHUB_TOKEN` | secret | Docker Hub access token with read and write rights |
-   | `EC2_HOST` | variable | Server address |
-   | `EC2_USER` | variable | SSH user (for example `ubuntu`) |
-   | `EC2_SSH_KEY` | secret | Private key of a key pair whose public key is in the server's `~/.ssh/authorized_keys` |
-   | `EC2_KNOWN_HOSTS` | secret | Output of `ssh-keyscan -t ed25519 <EC2_HOST>`, taken from a network you trust |
+### GitHub secrets (Settings → Secrets and variables → Actions → Repository secrets)
 
-   Optionally create an environment named `production` with required reviewers to get an approval step before each deploy.
+| Secret | Value |
+| --- | --- |
+| `EC2_HOST`, `EC2_USER` | Server address and SSH user |
+| `EC2_SSH_KEY` | Private key of the key pair |
+| `EC2_FINGERPRINT` | The server's host-key fingerprint, from `ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub \| cut -d ' ' -f2` run on the server (`SHA256:…`) |
+| `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN` | Docker Hub user and an access token with read and write rights. The same token pushes the image from the runner and pulls it on the server |
+| `MONGO_USER`, `MONGO_PASSWORD` | Credentials the MongoDB container is created with (any password; it is URL-encoded for you) |
+| `SESSION_SECRET` | Signs session cookies |
+| `CLIENT_ORIGIN` | Public address of the site, for example `https://renoviq.example.com` |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CALLBACK_URL` | Google sign-in |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` | Email sending |
+| `GEMINI_API_KEY` | Gemini access |
+| `FIREBASE_STORAGE_BUCKET`, `FIREBASE_SERVICE_ACCOUNT` | Bucket name and the service-account JSON (paste the whole file) |
+| optional: `MONGODB_DB_NAME`, `SMTP_SECURE`, `SMTP_FROM`, `CONTACT_FORM_RECEIVER_EMAIL`, `GEMINI_IMAGE_MODEL` | Defaults apply when empty (`renoviqai`, ...) |
 
-### Deploying
+A value cannot contain a single quote or a line break (the JSON file is the one multi-line exception). The first step of the workflow checks all of this and fails in seconds, naming what is missing.
 
-Actions tab → **Deploy backend** → Run workflow. It is manual only (it never runs on a push). It runs the type-check and tests (with a MongoDB service), builds the image, pushes `<user>/renoviq-backend:<commit>` and `:latest` to Docker Hub, copies `deploy/` to `/opt/renoviq`, logs in to Docker Hub on the server and runs `deploy.sh`, which starts the new container and waits for its health check. If the new version never becomes healthy, the previous image is started again and the workflow fails. Untick *deploy* to only build and push.
+### What one run does
 
-Deploy the web app with the **Deploy frontend** workflow in the frontend repository.
+1. Checks the secrets, runs the type-check and the tests (with a MongoDB service).
+2. Builds the Docker image on the GitHub runner and pushes `<user>/renoviq-backend:<commit>` and `:latest` to Docker Hub. Untick *deploy* to stop here.
+3. On the server: checks Docker, creates `/opt/renoviq` (first run only), copies `docker-compose.yml` and writes `/opt/renoviq/.env` from the secrets (mode 600).
+4. Logs in to Docker Hub on the server with the same token, pulls the image and starts the API container, waiting for its health check.
+5. **MongoDB** is started on the first run and then left alone (`--no-recreate`): later runs never restart or recreate it, and its data stays in the `mongo-data` volume.
+6. If the new API never becomes healthy, the workflow fails and the previous image is started again.
+
+Deploy the web app with the **Deploy frontend** workflow in the frontend repository. The SSH action and the copy action come from `appleboy` and are pinned to a commit; they receive the SSH key, so update the pin deliberately.
 
 ### Operating it
 
@@ -139,11 +143,11 @@ Deploy the web app with the **Deploy frontend** workflow in the frontend reposit
 cd /opt/renoviq
 docker compose ps                    # state and health
 docker compose logs -f api           # API log
-./deploy.sh <user>/renoviq-backend:<older-commit>    # roll back by hand
-./backup-mongo.sh                    # database dump into backups/, keeps 14 days
+IMAGE=<user>/renoviq-backend:<older-commit> docker compose up -d --no-deps api    # go back by hand
+docker compose exec -T mongo sh -c 'mongodump -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin --archive --gzip' > backup.archive.gz   # database backup
 ```
 
-Add the backup to cron, for example `0 3 * * * /opt/renoviq/backup-mongo.sh`, and copy `backups/` off the server: the database lives on the same machine as the app. The restore command is in the script's header.
+The database lives on the same machine as the app: run the backup from cron and copy it off the server. `MONGO_USER` and `MONGO_PASSWORD` only take effect when the database is first created; changing the secrets later does not change the existing database login (change it inside MongoDB first, or the API cannot connect).
 
 ## Known limits
 
@@ -151,4 +155,4 @@ Add the backup to cron, for example `0 3 * * * /opt/renoviq/backup-mongo.sh`, an
 - One server, one database container: no failover. The generation limits (one at a time, 10 per hour) are counted per process and in the database, which is correct for one API container.
 - The gallery keeps the original photo and the result in Firebase Storage forever; deleting a design removes only its database entry.
 - The AI result depends on the Gemini model; the prompt asks for the same layout but it is not guaranteed.
-- Not tested against the real Gemini, Firebase and Docker Hub services: those need your keys. The tests use fakes for them, and the deploy script was run against a local registry and a local Docker.
+- Not tested against the real Gemini, Firebase, Docker Hub and EC2: those need your keys and server. The tests use fakes for them, and the workflow's server commands were run against a local registry and local Docker. The GitHub Actions run itself has not happened yet.

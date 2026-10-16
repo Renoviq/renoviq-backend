@@ -1,5 +1,5 @@
 # Runs on the server in /opt/renoviq (copied there by the deploy workflow).
-# Variables come from /opt/renoviq/.env, see server.env.example.
+# /opt/renoviq/.env is written by the workflow from the GitHub secrets (deploy/render-env.sh).
 services:
   api:
     image: ${IMAGE:-renoviq-backend:unset}
@@ -8,7 +8,6 @@ services:
     environment:
       NODE_ENV: production
       PORT: "3000"
-      MONGODB_URI: mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongo:27017/?authSource=admin
     # Only nginx on this machine can reach the API.
     ports:
       - "127.0.0.1:3000:3000"
@@ -16,6 +15,8 @@ services:
       mongo:
         condition: service_healthy
 
+  # Created on the first deploy and then left alone: deploy.sh never recreates or restarts it,
+  # so the data volume and the credentials stay as they were on the first run.
   mongo:
     image: mongo:7
     restart: unless-stopped

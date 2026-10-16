@@ -76,8 +76,9 @@ async function generate(photo: Photo, prompt: string): Promise<Photo> {
           { type: "image", mime_type: photo.mimeType as "image/jpeg" | "image/png", data: photo.data.toString("base64") },
         ],
       },
-      // One retry at most: the default made a refused request (quota 0) take 30 s before the user saw the error.
-      { maxRetries: 1 },
+      // No automatic retries: the SDK waits as long as Google's Retry-After asks (up to a minute) before each one,
+      // so a refused request (quota 0) kept the user waiting a minute for the same error. The user can just try again.
+      { maxRetries: 0 },
     );
     image = interaction.output_image;
   } catch (err: any) {

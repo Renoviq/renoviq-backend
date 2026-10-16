@@ -1,5 +1,5 @@
-# Runs on the server in /opt/renoviq (copied there by the deploy workflow).
-# /opt/renoviq/.env is written by the workflow from the GitHub secrets (deploy/render-env.sh).
+# Runs on the server in /opt/renoviq (the deploy workflow copies this file there).
+# /opt/renoviq/.env is written by hand on the server, see server.env.example in this folder.
 services:
   api:
     image: ${IMAGE:-renoviq-backend:unset}
@@ -8,6 +8,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: "3000"
+      MONGODB_URI: mongodb://${MONGO_USER}:${MONGO_PASSWORD}@mongo:27017/?authSource=admin
     # Only nginx on this machine can reach the API.
     ports:
       - "127.0.0.1:3000:3000"

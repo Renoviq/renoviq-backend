@@ -3,7 +3,6 @@ dist
 .git
 .github
 deploy
-out
 .env*
 *.env
 *.md

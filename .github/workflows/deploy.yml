@@ -1,8 +1,9 @@
 name: Deploy backend
 
 # Manual only, to save GitHub Actions minutes: Actions tab -> Deploy backend -> Run workflow.
-# The first run also sets the server up: it creates /opt/renoviq, writes the .env file from the
-# GitHub secrets and starts the MongoDB container. Later runs only replace the API container.
+# The first run creates /opt/renoviq on the server. The application settings live in
+# /opt/renoviq/.env, which you write by hand on the server; this workflow only checks it exists.
+# MongoDB is created on the first run and left alone afterwards, only the API container is replaced.
 # nginx is configured by hand on the server and is never touched by this workflow.
 on:
   workflow_dispatch:
@@ -29,71 +30,45 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # First on purpose: a missing or malformed secret fails here in seconds, before any build time.
-      - name: Write the server .env file from the secrets
-        env:
-          MONGO_USER: ${{ secrets.MONGO_USER }}
-          MONGO_PASSWORD: ${{ secrets.MONGO_PASSWORD }}
-          MONGODB_DB_NAME: ${{ secrets.MONGODB_DB_NAME }}
-          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
-          CLIENT_ORIGIN: ${{ secrets.CLIENT_ORIGIN }}
-          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
-          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-          GOOGLE_CALLBACK_URL: ${{ secrets.GOOGLE_CALLBACK_URL }}
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_SECURE: ${{ secrets.SMTP_SECURE }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          SMTP_FROM: ${{ secrets.SMTP_FROM }}
-          CONTACT_FORM_RECEIVER_EMAIL: ${{ secrets.CONTACT_FORM_RECEIVER_EMAIL }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_IMAGE_MODEL: ${{ secrets.GEMINI_IMAGE_MODEL }}
-          FIREBASE_STORAGE_BUCKET: ${{ secrets.FIREBASE_STORAGE_BUCKET }}
-          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-        run: |
-          umask 077
-          mkdir -p out
-          missing=""
-          for name in MONGO_USER MONGO_PASSWORD SESSION_SECRET CLIENT_ORIGIN GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET \
-            GOOGLE_CALLBACK_URL SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS GEMINI_API_KEY FIREBASE_STORAGE_BUCKET \
-            FIREBASE_SERVICE_ACCOUNT; do
-            [ -n "${!name:-}" ] || missing="$missing $name"
-          done
-          if [ -n "$missing" ]; then
-            echo "::error::These GitHub secrets are missing or empty:$missing"
-            exit 1
-          fi
-
-          # The service-account key is JSON; jq checks it and puts it on one line.
-          firebase="$(printf '%s' "$FIREBASE_SERVICE_ACCOUNT" | jq -ce 'select(has("private_key") and has("client_email"))' 2> /dev/null || true)"
-          if [ -z "$firebase" ]; then
-            echo "::error::FIREBASE_SERVICE_ACCOUNT is not a service-account JSON (it needs private_key and client_email)"
-            exit 1
-          fi
-
-          enc() { jq -rn --arg v "$1" '$v | @uri'; }
-          {
-            # Every value is single-quoted so Docker Compose does not interpret $ or #.
+      # First on purpose: a missing Docker, folder permission or .env value fails here in seconds,
+      # before any build time is spent. Third-party actions get the SSH key, so they are pinned to a commit.
+      - name: Check the server (Docker, /opt/renoviq, .env)
+        if: ${{ inputs.deploy }}
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          fingerprint: ${{ secrets.EC2_FINGERPRINT }}
+          script: |
+            set -eu
+            if ! docker compose version > /dev/null 2>&1 || ! docker info > /dev/null 2>&1; then
+              echo "Docker Engine with the Compose plugin must be installed and usable by this user (sudo usermod -aG docker $(id -un), then log in again)"
+              exit 1
+            fi
+            if [ ! -w /opt/renoviq ]; then
+              sudo -n install -d -o "$(id -un)" -g "$(id -gn)" /opt/renoviq || {
+                echo "Cannot create /opt/renoviq: give this user passwordless sudo, or run once: sudo install -d -o $(id -un) /opt/renoviq"
+                exit 1
+              }
+              echo "Created /opt/renoviq"
+            fi
+            cd /opt/renoviq
+            if [ ! -f .env ]; then
+              echo "Write /opt/renoviq/.env on the server first (template: deploy/server.env.example in this repository), then run this workflow again."
+              exit 1
+            fi
+            missing=""
             for name in MONGO_USER MONGO_PASSWORD SESSION_SECRET CLIENT_ORIGIN GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET \
-              GOOGLE_CALLBACK_URL SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS GEMINI_API_KEY FIREBASE_STORAGE_BUCKET; do
-              printf "%s='%s'\n" "$name" "${!name}"
+              GOOGLE_CALLBACK_URL SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS GEMINI_API_KEY FIREBASE_STORAGE_BUCKET \
+              FIREBASE_SERVICE_ACCOUNT; do
+              grep -q "^$name=." .env || missing="$missing $name"
             done
-            printf "FIREBASE_SERVICE_ACCOUNT='%s'\n" "$firebase"
-            # The API reaches MongoDB over the compose network; user and password are URL-encoded for the address.
-            printf "MONGODB_URI='mongodb://%s:%s@mongo:27017/?authSource=admin'\n" "$(enc "$MONGO_USER")" "$(enc "$MONGO_PASSWORD")"
-            printf "MONGODB_DB_NAME='%s'\n" "${MONGODB_DB_NAME:-renoviqai}"
-            for name in SMTP_SECURE SMTP_FROM CONTACT_FORM_RECEIVER_EMAIL GEMINI_IMAGE_MODEL; do
-              [ -z "${!name:-}" ] || printf "%s='%s'\n" "$name" "${!name}"
-            done
-          } > out/server.env
-
-          # A value with a single quote or a line break cannot be stored this way.
-          if grep -qvE "^[A-Za-z_]+='[^']*'$" out/server.env; then
-            rm -f out/server.env
-            echo "::error::A secret contains a single quote or a line break, which the .env file cannot hold"
-            exit 1
-          fi
+            if [ -n "$missing" ]; then
+              echo "/opt/renoviq/.env has no value for:$missing"
+              exit 1
+            fi
+            echo "Server is ready"
 
       - uses: actions/setup-node@v4
         with:
@@ -116,29 +91,7 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/renoviq-backend:${{ github.sha }}
             ${{ secrets.DOCKERHUB_USERNAME }}/renoviq-backend:latest
 
-      # Third-party actions get the SSH key, so they are pinned to a commit instead of a moving tag.
-      - name: Check Docker on the server and create /opt/renoviq (first run)
-        if: ${{ inputs.deploy }}
-        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          fingerprint: ${{ secrets.EC2_FINGERPRINT }}
-          script: |
-            set -eu
-            if ! docker compose version > /dev/null 2>&1 || ! docker info > /dev/null 2>&1; then
-              echo "Docker Engine with the Compose plugin must be installed and usable by this user (sudo usermod -aG docker $(id -un), then log in again)"
-              exit 1
-            fi
-            if [ ! -w /opt/renoviq ]; then
-              sudo -n install -d -o "$(id -un)" -g "$(id -gn)" /opt/renoviq || {
-                echo "Cannot create /opt/renoviq: give this user passwordless sudo, or run once: sudo install -d -o $(id -un) /opt/renoviq"
-                exit 1
-              }
-            fi
-
-      - name: Copy the compose file and the .env file to the server
+      - name: Copy the compose file to the server
         if: ${{ inputs.deploy }}
         uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
         with:
@@ -146,7 +99,7 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           fingerprint: ${{ secrets.EC2_FINGERPRINT }}
-          source: deploy/docker-compose.yml,out/server.env
+          source: deploy/docker-compose.yml
           target: /opt/renoviq
           strip_components: 1
 
@@ -168,7 +121,6 @@ jobs:
           script: |
             set -eu
             cd /opt/renoviq
-            chmod 600 server.env && mv -f server.env .env
             printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
             export IMAGE="$DOCKERHUB_USERNAME/renoviq-backend:$SHA"
             docker compose up -d --no-recreate --wait mongo

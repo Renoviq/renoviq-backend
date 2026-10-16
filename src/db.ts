@@ -16,7 +16,8 @@ export async function connectToDatabase() {
   client = new MongoClient(uri);
   await client.connect();
   db = client.db(dbName);
-  console.log("Connected to MongoDB:", uri, "Database:", dbName);
+  // The address can contain the password, so it is not logged.
+  console.log("Connected to MongoDB:", uri.replace(/\/\/[^@/]*@/, "//***@"), "Database:", dbName);
   return db;
 }
 

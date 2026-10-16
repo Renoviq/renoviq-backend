@@ -68,13 +68,17 @@ async function generate(photo: Photo, prompt: string): Promise<Photo> {
 
   let image: { data?: string; mime_type?: string } | undefined;
   try {
-    const interaction = await client.interactions.create({
-      model: e.model,
-      input: [
-        { type: "text", text: prompt },
-        { type: "image", mime_type: photo.mimeType as "image/jpeg" | "image/png", data: photo.data.toString("base64") },
-      ],
-    });
+    const interaction = await client.interactions.create(
+      {
+        model: e.model,
+        input: [
+          { type: "text", text: prompt },
+          { type: "image", mime_type: photo.mimeType as "image/jpeg" | "image/png", data: photo.data.toString("base64") },
+        ],
+      },
+      // One retry at most: the default made a refused request (quota 0) take 30 s before the user saw the error.
+      { maxRetries: 1 },
+    );
     image = interaction.output_image;
   } catch (err: any) {
     console.error("Gemini request failed:", err?.status, err?.message);

@@ -121,13 +121,18 @@ jobs:
           script: |
             set -eu
             cd /opt/renoviq
+            # Older versions of this workflow kept the whole image name in .current-image.
+            if [ ! -s .last_good_image ] && [ -s .current-image ]; then sed 's/.*://' .current-image > .last_good_image; fi
             printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin
             export IMAGE="$DOCKERHUB_USERNAME/renoviq-backend:$SHA"
             docker compose up -d --no-recreate --wait mongo
             docker compose pull api
             docker compose up -d --no-deps --wait --wait-timeout 90 api
-            echo "$IMAGE" > .current-image
-            docker image prune -f > /dev/null
+            # It is healthy: it is now the last good version. Prune removes every image no container uses,
+            # so only this one (and MongoDB) stays on the server.
+            echo "$SHA" > .last_good_image
+            rm -f .current-image
+            docker image prune -af > /dev/null
 
       # The app is already running at this point; this tells you early if photos cannot be saved.
       - name: Check that the API container can reach the S3 bucket
@@ -151,20 +156,26 @@ jobs:
                 process.exit(1);
               });"
 
-      # .current-image holds the last version that passed its health check.
-      - name: Roll back to the previous image
+      # /opt/renoviq/.last_good_image holds the commit SHA of the last version that passed its health
+      # check. Only that image is kept on the server, so it is what a failed deploy rolls back to.
+      - name: Roll back to the last good image
         if: ${{ failure() && steps.run.outcome == 'failure' }}
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           fingerprint: ${{ secrets.EC2_FINGERPRINT }}
+          envs: DOCKERHUB_USERNAME
           script: |
             cd /opt/renoviq
             docker compose logs --tail 40 api
-            if [ -s .current-image ]; then
-              export IMAGE="$(cat .current-image)"
+            if [ -s .last_good_image ]; then
+              export IMAGE="$DOCKERHUB_USERNAME/renoviq-backend:$(cat .last_good_image)"
               echo "Rolling back to $IMAGE"
               docker compose up -d --no-deps --wait api
+              # The failed image is not used by any container now, so prune removes it.
+              docker image prune -af > /dev/null
             fi

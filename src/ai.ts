@@ -1,16 +1,13 @@
 import { randomUUID } from "node:crypto";
+import type { Readable } from "node:stream";
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { GoogleGenAI } from "@google/genai";
-import { cert, getApps, initializeApp } from "firebase-admin/app";
-import { getStorage } from "firebase-admin/storage";
 import "./config";
 
-// AI redesign: read the uploaded photo, ask Gemini for a redesigned version, store the
-// result in Firebase Storage. Everything the routes need is on the `ai` object at the
-// bottom so tests can swap single functions.
+// AI redesign: ask Gemini for a redesigned version of a room photo and keep the pictures in S3.
+// Everything the routes need is on the `ai` object at the bottom so tests can swap single functions.
 
-const PHOTO_HOST = "firebasestorage.googleapis.com";
-const PHOTO_TYPES = ["image/jpeg", "image/png"];
-const MAX_PHOTO_BYTES = 5 * 1024 * 1024; // same limit as the upload form
+export const MAX_PHOTO_BYTES = 5 * 1024 * 1024; // same limit as the upload form
 const GENERATE_TIMEOUT_MS = 90_000;
 
 export class GenerationError extends Error {
@@ -29,52 +26,24 @@ const env = () => ({
   // The model name is a setting because Google renames and retires image models.
   model: process.env.GEMINI_IMAGE_MODEL || "gemini-nano-banana-2.1",
   geminiBaseUrl: process.env.GEMINI_BASE_URL, // only for proxies and tests
-  bucket: process.env.FIREBASE_STORAGE_BUCKET,
-  serviceAccount: process.env.FIREBASE_SERVICE_ACCOUNT,
+  bucket: process.env.S3_BUCKET,
+  region: process.env.AWS_REGION,
+  // Only for S3-compatible servers (MinIO, tests). Leave unset for AWS.
+  s3Endpoint: process.env.S3_ENDPOINT,
 });
 
 function configured(): boolean {
   const e = env();
-  return Boolean(e.geminiKey && e.bucket && e.serviceAccount);
+  return Boolean(e.geminiKey && e.bucket && e.region);
 }
 
-// Only photos the browser uploaded to this app's own bucket under uploads/ may be fetched.
-// Without this the server could be pointed at any URL (internal addresses included).
-export function isOwnPhotoUrl(raw: string, bucket = env().bucket): boolean {
-  if (!bucket) return false;
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    return false;
+// The type comes from the file's first bytes, never from what the browser says it is.
+export function sniffImage(data: Buffer): "image/jpeg" | "image/png" | null {
+  if (data.length > 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) return "image/jpeg";
+  if (data.length > 8 && data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return "image/png";
   }
-  return (
-    url.protocol === "https:" &&
-    url.host === PHOTO_HOST &&
-    url.pathname.startsWith(`/v0/b/${bucket}/o/uploads%2F`)
-  );
-}
-
-async function fetchPhoto(url: string): Promise<Photo> {
-  let res: Response;
-  try {
-    // redirect: "error" so an allowed URL cannot bounce the server somewhere else.
-    res = await fetch(url, { redirect: "error", signal: AbortSignal.timeout(15_000) });
-  } catch {
-    throw new GenerationError(400, "Could not read the uploaded photo. Please upload it again.");
-  }
-  if (!res.ok) throw new GenerationError(400, "Could not read the uploaded photo. Please upload it again.");
-
-  const mimeType = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
-  if (!PHOTO_TYPES.includes(mimeType)) {
-    throw new GenerationError(400, "The photo must be a JPG or PNG image.");
-  }
-  const declared = Number(res.headers.get("content-length") || 0);
-  if (declared > MAX_PHOTO_BYTES) throw new GenerationError(400, "The photo must be 5 MB or smaller.");
-
-  const data = Buffer.from(await res.arrayBuffer());
-  if (data.length > MAX_PHOTO_BYTES) throw new GenerationError(400, "The photo must be 5 MB or smaller.");
-  return { data, mimeType };
+  return null;
 }
 
 export function buildPrompt(opts: { roomType: string; style?: string; description?: string }): string {
@@ -125,27 +94,49 @@ async function generate(photo: Photo, prompt: string): Promise<Photo> {
   return { data: Buffer.from(image.data, "base64"), mimeType: image.mime_type || "image/png" };
 }
 
-// Same URL shape as Firebase's getDownloadURL, so the gallery treats both photos alike.
-export function downloadUrl(bucket: string, path: string, token: string): string {
-  return `https://${PHOTO_HOST}/v0/b/${bucket}/o/${encodeURIComponent(path)}?alt=media&token=${token}`;
-}
-
-async function store(userId: string, image: Photo): Promise<string> {
+// Credentials come from the usual AWS places: the instance role on EC2, or AWS_ACCESS_KEY_ID and
+// AWS_SECRET_ACCESS_KEY in the environment.
+let s3: S3Client | undefined;
+function client(): S3Client {
   const e = env();
-  const app =
-    getApps()[0] ??
-    initializeApp({ credential: cert(JSON.parse(e.serviceAccount!)), storageBucket: e.bucket });
-  const ext = image.mimeType === "image/jpeg" ? "jpg" : image.mimeType === "image/webp" ? "webp" : "png";
-  const path = `generated/${userId}/${randomUUID()}.${ext}`;
-  const token = randomUUID();
-  await getStorage(app)
-    .bucket(e.bucket)
-    .file(path)
-    .save(image.data, {
-      contentType: image.mimeType,
-      metadata: { metadata: { firebaseStorageDownloadTokens: token } },
-    });
-  return downloadUrl(e.bucket!, path, token);
+  return (s3 ??= new S3Client({
+    region: e.region,
+    ...(e.s3Endpoint && { endpoint: e.s3Endpoint, forcePathStyle: true }),
+  }));
 }
 
-export const ai = { configured, isOwnPhotoUrl, fetchPhoto, generate, store };
+const EXTENSIONS: Record<string, string> = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" };
+
+// Saves a picture and returns its S3 key: <kind>/<user id>/<random>.<ext>
+async function store(userId: string, kind: "originals" | "generated", image: Photo): Promise<string> {
+  const key = `${kind}/${userId}/${randomUUID()}.${EXTENSIONS[image.mimeType] ?? "bin"}`;
+  try {
+    await client().send(
+      new PutObjectCommand({ Bucket: env().bucket, Key: key, Body: image.data, ContentType: image.mimeType }),
+    );
+  } catch (err: any) {
+    console.error("S3 upload failed:", err?.name, err?.message);
+    throw new GenerationError(502, "The design could not be saved. Please try again.");
+  }
+  return key;
+}
+
+async function load(key: string): Promise<{ body: Readable; contentType: string; length?: number }> {
+  const out = await client().send(new GetObjectCommand({ Bucket: env().bucket, Key: key }));
+  return {
+    body: out.Body as Readable,
+    contentType: out.ContentType || "application/octet-stream",
+    length: out.ContentLength,
+  };
+}
+
+// Entries from before S3 hold full URLs instead of keys; those are not ours to delete.
+async function remove(keys: string[]): Promise<void> {
+  await Promise.all(
+    keys
+      .filter((key) => key && !/^https?:\/\//i.test(key))
+      .map((key) => client().send(new DeleteObjectCommand({ Bucket: env().bucket, Key: key }))),
+  );
+}
+
+export const ai = { configured, generate, store, load, remove };

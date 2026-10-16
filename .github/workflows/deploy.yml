@@ -60,8 +60,7 @@ jobs:
             fi
             missing=""
             for name in MONGO_USER MONGO_PASSWORD SESSION_SECRET CLIENT_ORIGIN GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET \
-              GOOGLE_CALLBACK_URL SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS GEMINI_API_KEY FIREBASE_STORAGE_BUCKET \
-              FIREBASE_SERVICE_ACCOUNT; do
+              GOOGLE_CALLBACK_URL SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS GEMINI_API_KEY S3_BUCKET AWS_REGION; do
               grep -q "^$name=." .env || missing="$missing $name"
             done
             if [ -n "$missing" ]; then
@@ -128,6 +127,28 @@ jobs:
             docker compose up -d --no-deps --wait --wait-timeout 90 api
             echo "$IMAGE" > .current-image
             docker image prune -f > /dev/null
+
+      # The app is already running at this point; this tells you early if photos cannot be saved.
+      - name: Check that the API container can reach the S3 bucket
+        if: ${{ inputs.deploy }}
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          fingerprint: ${{ secrets.EC2_FINGERPRINT }}
+          script: |
+            set -eu
+            cd /opt/renoviq
+            docker compose exec -T api node -e "
+              import('@aws-sdk/client-s3').then(async ({ S3Client, HeadBucketCommand }) => {
+                await new S3Client({}).send(new HeadBucketCommand({ Bucket: process.env.S3_BUCKET }));
+                console.log('S3 bucket ' + process.env.S3_BUCKET + ' is reachable');
+              }).catch((e) => {
+                console.error('S3 check failed: ' + e.name + ' (HTTP ' + ((e.$metadata && e.$metadata.httpStatusCode) || 'none') + '): ' + e.message);
+                console.error('Check S3_BUCKET and AWS_REGION in /opt/renoviq/.env, the IAM role on the instance and its metadata hop limit (docs/deployment.md).');
+                process.exit(1);
+              });"
 
       # .current-image holds the last version that passed its health check.
       - name: Roll back to the previous image

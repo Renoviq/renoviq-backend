@@ -15,13 +15,20 @@ import { sendEmail } from "./email";
 import { generateVerificationEmailContent } from "./email";
 import passport from "passport";
 import { ObjectId } from "mongodb";
-import { ai, buildPrompt, GenerationError } from "./ai";
+import multer from "multer";
+import { pipeline } from "node:stream";
+import { ai, buildPrompt, GenerationError, MAX_PHOTO_BYTES, sniffImage } from "./ai";
 import { config } from "./config";
 
 // Users with a design being generated right now: one at a time each, so the hourly
 // limit cannot be beaten by sending many requests at once.
 // ponytail: in memory, fine for one server process; use a shared lock if you scale out.
 const generating = new Set<string>();
+
+// The room photo arrives as the "photo" part of a multipart form and is kept in memory (5 MB at most).
+const uploadPhoto = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_PHOTO_BYTES, files: 1 } }).single("photo");
+const readUpload = (req: Parameters<typeof uploadPhoto>[0], res: Parameters<typeof uploadPhoto>[1]) =>
+  new Promise<void>((resolve, reject) => uploadPhoto(req, res, (err) => (err ? reject(err) : resolve())));
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // CORS and body parsing are set up in index.ts. Passport and the session are set up here.
@@ -293,17 +300,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     if (!req.isAuthenticated()) return res.sendStatus(401);
     const userId = req.user.id;
 
-    const parsed = createRenovationSchema.safeParse(req.body);
-    if (!parsed.success) {
-      return res.status(400).json({ error: parsed.error.errors });
-    }
-    const { originalImage, roomType, style, description } = parsed.data;
-
     if (!ai.configured()) {
       return res.status(503).json({ error: "AI design is not set up on this server yet." });
-    }
-    if (!ai.isOwnPhotoUrl(originalImage)) {
-      return res.status(400).json({ error: "The photo must be uploaded through the app." });
     }
     if (generating.has(userId)) {
       return res.status(429).json({ error: "A design is already being created. Please wait for it to finish." });
@@ -311,6 +309,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     generating.add(userId);
     try {
+      try {
+        await readUpload(req, res);
+      } catch (error) {
+        if (error instanceof multer.MulterError) {
+          return res.status(400).json({
+            error: error.code === "LIMIT_FILE_SIZE" ? "The photo must be 5 MB or smaller." : "The upload was not understood.",
+          });
+        }
+        throw error;
+      }
+
+      const parsed = createRenovationSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: parsed.error.errors });
+      }
+      if (!req.file) {
+        return res.status(400).json({ error: "Please attach a photo of your room." });
+      }
+      const mimeType = sniffImage(req.file.buffer);
+      if (!mimeType) {
+        return res.status(400).json({ error: "The photo must be a JPG or PNG image." });
+      }
+      const { roomType, style, description } = parsed.data;
+
       const since = new Date(Date.now() - 60 * 60 * 1000);
       if ((await storage.countRenovationsSince(userId, since)) >= MAX_DESIGNS_PER_HOUR) {
         return res.status(429).json({
@@ -318,9 +340,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
 
-      const photo = await ai.fetchPhoto(originalImage);
+      const photo = { data: req.file.buffer, mimeType };
       const result = await ai.generate(photo, buildPrompt({ roomType, style, description }));
-      const generatedImage = await ai.store(userId, result);
+      // Nothing is stored unless the AI succeeded. If the database save fails after this, the two
+      // pictures stay in S3 unused.
+      const [originalImage, generatedImage] = await Promise.all([
+        ai.store(userId, "originals", photo),
+        ai.store(userId, "generated", result),
+      ]);
 
       const renovation = await storage.createRenovation({
         userId,
@@ -342,6 +369,33 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // The pictures stay private in S3. Their owner loads them through here (the browser sends the session cookie).
+  app.get("/api/renovations/:id/:kind(original|generated)", async (req, res) => {
+    if (!req.isAuthenticated()) return res.sendStatus(401);
+    if (!ObjectId.isValid(req.params.id)) return res.sendStatus(400);
+    try {
+      const keys = await storage.getRenovationKeys(req.params.id, req.user.id);
+      if (!keys) return res.sendStatus(404);
+      const key = req.params.kind === "original" ? keys.originalImage : keys.generatedImage;
+      if (/^https?:\/\//i.test(key)) return res.redirect(key); // entries from before S3
+
+      const image = await ai.load(key);
+      res.set({
+        "Content-Type": image.contentType,
+        "Cache-Control": "private, max-age=86400",
+        "X-Content-Type-Options": "nosniff",
+        ...(image.length !== undefined && { "Content-Length": String(image.length) }),
+      });
+      pipeline(image.body, res, (err) => {
+        if (err) console.error("Streaming a picture failed:", err.message);
+      });
+    } catch (error: any) {
+      if (error?.name === "NoSuchKey" || error?.$metadata?.httpStatusCode === 404) return res.sendStatus(404);
+      console.error("Load picture error:", error?.name, error?.message);
+      res.sendStatus(502);
+    }
+  });
+
   app.delete("/api/renovations/:id", async (req, res) => {
     try {
       if (!req.isAuthenticated()) return res.sendStatus(401);
@@ -350,8 +404,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!ObjectId.isValid(renovationId))
         return res.status(400).send("Invalid renovation ID");
 
-      const deleted = await storage.deleteRenovation(renovationId, req.user.id);
-      if (!deleted) return res.sendStatus(404);
+      const keys = await storage.deleteRenovation(renovationId, req.user.id);
+      if (!keys) return res.sendStatus(404);
+      // The design is gone either way; a failed clean-up only leaves two unused files in S3.
+      if (ai.configured()) {
+        await ai.remove([keys.originalImage, keys.generatedImage]).catch((err) => console.error("S3 clean-up failed:", err?.message));
+      }
       res.sendStatus(200);
     } catch (error) {
       res.status(500).json({ error: "Failed to delete renovation" });

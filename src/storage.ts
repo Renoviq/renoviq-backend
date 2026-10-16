@@ -6,6 +6,13 @@ import { ObjectId } from "mongodb";
 
 const MemoryStore = createMemoryStore(session);
 
+// What is stored for a design's two pictures: S3 keys (older entries may hold full URLs).
+export type RenovationKeys = { originalImage: string; generatedImage: string };
+
+// The browser gets API addresses; GET /api/renovations/:id/original|generated serves the picture to its owner.
+const imageUrl = (id: string, kind: "original" | "generated", stored: string) =>
+  !stored || /^https?:\/\//i.test(stored) ? stored : `/api/renovations/${id}/${kind}`;
+
 export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
@@ -22,7 +29,8 @@ export interface IStorage {
   getRenovationsByUserId(userId: string): Promise<Renovation[]>;
   createRenovation(renovation: InsertRenovation): Promise<Renovation>;
   countRenovationsSince(userId: string, since: Date): Promise<number>;
-  deleteRenovation(id: string, userId: string): Promise<boolean>;
+  getRenovationKeys(id: string, userId: string): Promise<RenovationKeys | null>;
+  deleteRenovation(id: string, userId: string): Promise<RenovationKeys | null>;
   createContactFormEntry(data: { fullName: string; email: string; company: string; message: string; }): Promise<void>;
   sessionStore: session.Store;
 }
@@ -145,8 +153,8 @@ export class MongoStorage implements IStorage {
     return {
       id: doc._id.toHexString(),
       userId: String(doc.userId),
-      originalImage: String(doc.originalImage || ""),
-      generatedImage: String(doc.generatedImage || ""),
+      originalImage: imageUrl(doc._id.toHexString(), "original", String(doc.originalImage || "")),
+      generatedImage: imageUrl(doc._id.toHexString(), "generated", String(doc.generatedImage || "")),
       roomType: String(doc.roomType || ""),
       style: doc.style || null,
       description: doc.description || null,
@@ -181,11 +189,18 @@ export class MongoStorage implements IStorage {
     return renovations.countDocuments({ userId, createdAt: { $gte: since } });
   }
 
-  // Only the owner can delete a renovation. Returns false when nothing matched.
-  async deleteRenovation(id: string, userId: string): Promise<boolean> {
+  // Only the owner can read a design's picture keys.
+  async getRenovationKeys(id: string, userId: string): Promise<RenovationKeys | null> {
     const renovations = await this.getRenovationsCollection();
-    const { deletedCount } = await renovations.deleteOne({ _id: new ObjectId(id), userId });
-    return deletedCount === 1;
+    const doc = await renovations.findOne({ _id: new ObjectId(id), userId });
+    return doc ? { originalImage: String(doc.originalImage || ""), generatedImage: String(doc.generatedImage || "") } : null;
+  }
+
+  // Only the owner can delete a renovation. Returns its picture keys, or null when nothing matched.
+  async deleteRenovation(id: string, userId: string): Promise<RenovationKeys | null> {
+    const renovations = await this.getRenovationsCollection();
+    const doc = await renovations.findOneAndDelete({ _id: new ObjectId(id), userId });
+    return doc ? { originalImage: String(doc.originalImage || ""), generatedImage: String(doc.generatedImage || "") } : null;
   }
 
   async createContactFormEntry(data: { fullName: string; email: string; company: string; message: string; }): Promise<void> {

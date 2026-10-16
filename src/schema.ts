@@ -22,6 +22,7 @@ export type User = {
 export type Renovation = {
   id: string;
   userId: string;
+  // Addresses the browser can load, for example /api/renovations/<id>/original.
   originalImage: string;
   generatedImage: string;
   roomType: string;
@@ -53,17 +54,9 @@ export const verifyOtpSchema = z.object({
   otp: z.string().length(6),
 });
 
-const httpUrl = z
-  .string()
-  .max(2048)
-  .url()
-  .refine((u) => /^https?:\/\//i.test(u), "Must be an http(s) URL");
-
-// Body of POST /api/renovations. The browser uploads the photo to Firebase Storage
-// and sends only its URL; the server checks that URL, asks the AI for the redesign and
-// stores the result, so the client cannot set generatedImage itself.
+// Fields of POST /api/renovations, a multipart form whose "photo" part is the room photo.
+// The server checks the photo, asks the AI for the redesign and stores both pictures in S3.
 export const createRenovationSchema = z.object({
-  originalImage: httpUrl,
   roomType: z.string().trim().min(1).max(50),
   style: z.string().trim().max(50).optional(),
   description: z.string().trim().max(2000).optional(),
@@ -73,8 +66,11 @@ export const createRenovationSchema = z.object({
 export const MAX_DESIGNS_PER_HOUR = 10;
 
 export type InsertUserSchema = z.infer<typeof insertUserSchema>;
+// originalImage and generatedImage are S3 object keys when stored (the API turns them into
+// /api/renovations/:id/original and /generated for the browser).
 export type InsertRenovation = z.infer<typeof createRenovationSchema> & {
   userId: string;
+  originalImage: string;
   generatedImage: string;
 };
 export type VerifyOtp = z.infer<typeof verifyOtpSchema>;

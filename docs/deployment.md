@@ -157,14 +157,11 @@ ssh-keygen -t ed25519 -f renoviq-deploy -C github-actions -N ""
 cat renoviq-deploy.pub
 ```
 
-On the server, add the public line to `~/.ssh/authorized_keys`, and print the server's fingerprint:
+On the server, add the public line to `~/.ssh/authorized_keys`:
 
 ```bash
 echo "PASTE_THE_PUBLIC_LINE_HERE" >> ~/.ssh/authorized_keys
-ssh-keygen -l -f /etc/ssh/ssh_host_ecdsa_key.pub | cut -d ' ' -f2      # SHA256:...  (the ECDSA key, see below)
 ```
-
-The fingerprint is the ECDSA one on purpose: the SSH action connects using the server's ECDSA host key, so an ed25519 or RSA fingerprint is rejected as a mismatch.
 
 ## 9. Add the GitHub secrets
 
@@ -179,9 +176,8 @@ Each repository: Settings → Secrets and variables → Actions → **New reposi
 | `EC2_HOST` | The Elastic IP or `YOUR.DOMAIN` |
 | `EC2_USER` | `ubuntu` |
 | `EC2_SSH_KEY` | The whole private key file `renoviq-deploy` (with the BEGIN and END lines) |
-| `EC2_FINGERPRINT` | The `SHA256:...` line from step 8, exactly as printed (with the `SHA256:` start and no spaces or line break around it) |
 
-**renoviq-frontend**: the same four `EC2_HOST`, `EC2_USER`, `EC2_SSH_KEY`, `EC2_FINGERPRINT`.
+**renoviq-frontend**: the same three `EC2_HOST`, `EC2_USER`, `EC2_SSH_KEY`.
 
 Also outside GitHub:
 
@@ -221,7 +217,6 @@ What the backend run does, in order: checks Docker, the folder and the `.env` fi
 | "Docker Engine with the Compose plugin must be installed…" | Step 4: install Docker and log out and in again after `usermod` |
 | "Write /opt/renoviq/.env on the server first" or "has no value for: …" | Step 6: it names the missing variables |
 | "Cannot create /opt/renoviq" | Give the user passwordless sudo (default on EC2 Ubuntu) or do step 5 |
-| "host key fingerprint mismatch" in an SSH step | `EC2_FINGERPRINT` is wrong. It must be the **ECDSA** host key fingerprint (the one the SSH action connects with, not ed25519 or RSA), including the `SHA256:` start. Redo step 8 on the server and paste it again in both repos |
 | "S3 check failed … (HTTP 403)" | The role policy or bucket name is wrong (steps 1 and 2) |
 | "S3 check failed … Could not load credentials" | The role is not attached to the instance, or the metadata hop limit is not 2 (step 3) |
 | The new API is "unhealthy" | `docker compose logs --tail 50 api`; usually a wrong value in `.env` |

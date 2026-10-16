@@ -39,7 +39,6 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          fingerprint: ${{ secrets.EC2_FINGERPRINT }}
           script: |
             set -eu
             if ! docker compose version > /dev/null 2>&1 || ! docker info > /dev/null 2>&1; then
@@ -98,7 +97,6 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          fingerprint: ${{ secrets.EC2_FINGERPRINT }}
           source: deploy/docker-compose.yml
           target: /opt/renoviq
           strip_components: 1
@@ -116,7 +114,6 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          fingerprint: ${{ secrets.EC2_FINGERPRINT }}
           envs: DOCKERHUB_USERNAME,DOCKERHUB_TOKEN,SHA
           script: |
             set -eu
@@ -142,7 +139,6 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          fingerprint: ${{ secrets.EC2_FINGERPRINT }}
           script: |
             set -eu
             cd /opt/renoviq
@@ -167,7 +163,6 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          fingerprint: ${{ secrets.EC2_FINGERPRINT }}
           envs: DOCKERHUB_USERNAME
           script: |
             cd /opt/renoviq
